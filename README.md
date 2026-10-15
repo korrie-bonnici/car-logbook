@@ -68,6 +68,49 @@ a trip.
 
 ---
 
+## Publishing it the first time
+
+Needs the GitHub CLI. If `gh --version` fails, install it:
+
+```bash
+winget install --id GitHub.cli -e
+```
+
+Close and reopen the terminal afterwards so `gh` lands on your PATH, then sign
+in. This opens a browser and cannot be scripted:
+
+```bash
+gh auth login
+```
+
+Choose GitHub.com, HTTPS, and authenticate in the browser. Confirm with:
+
+```bash
+gh auth status
+```
+
+Then, from the project folder, create the repository and push:
+
+```bash
+gh repo create car-logbook --public --source=. --remote=origin --push
+```
+
+Turn on Pages with GitHub Actions as the source:
+
+```bash
+gh api -X POST "repos/{owner}/car-logbook/pages" -f build_type=workflow
+```
+
+Watch the first deploy:
+
+```bash
+gh run watch
+```
+
+When it finishes, the site is at
+`https://<your-github-username>.github.io/car-logbook/`. The first deploy can
+take a couple of minutes longer than later ones while Pages provisions.
+
 ## How deploying works
 
 Every push to `main` triggers `.github/workflows/deploy.yml`, which installs
