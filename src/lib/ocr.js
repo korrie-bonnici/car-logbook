@@ -102,11 +102,13 @@ export function isEngineReady() {
 }
 
 /**
- * Grayscale + contrast stretch at 2x scale. Odometer photos are usually dim
- * and low-contrast behind glass, and this lifts recognition noticeably.
+ * Grayscale + contrast stretch at up to 2x scale. Odometer photos are usually
+ * dim and low-contrast behind glass, and this lifts recognition noticeably.
  */
 async function preprocess(blob) {
-  const bitmap = await createImageBitmap(blob).catch(() => null);
+  const bitmap = await createImageBitmap(blob, { imageOrientation: 'from-image' }).catch(
+    () => null,
+  );
   if (!bitmap) return blob;
 
   const scale = Math.min(2, 1600 / Math.max(bitmap.width, bitmap.height));
@@ -124,51 +126,78 @@ async function preprocess(blob) {
   const image = ctx.getImageData(0, 0, w, h);
   const px = image.data;
 
-  // Pass one: luminance, and track the range actually used.
-  let min = 255;
-  let max = 0;
   const grey = new Uint8ClampedArray(px.length / 4);
   for (let i = 0, g = 0; i < px.length; i += 4, g += 1) {
-    const value = (px[i] * 0.299 + px[i + 1] * 0.587 + px[i + 2] * 0.114) | 0;
-    grey[g] = value;
-    if (value < min) min = value;
-    if (value > max) max = value;
+    grey[g] = (px[i] * 0.299 + px[i + 1] * 0.587 + px[i + 2] * 0.114) | 0;
   }
 
-  // Pass two: stretch that range back out to full black-to-white.
-  const span = Math.max(1, max - min);
+  const out = normaliseLuminance(grey);
   for (let i = 0, g = 0; i < px.length; i += 4, g += 1) {
-    const value = ((grey[g] - min) * 255) / span;
-    px[i] = value;
-    px[i + 1] = value;
-    px[i + 2] = value;
+    px[i] = out[g];
+    px[i + 1] = out[g];
+    px[i + 2] = out[g];
     px[i + 3] = 255;
   }
   ctx.putImageData(image, 0, 0);
 
   return new Promise((resolve) => {
-    canvas.toBlob((out) => resolve(out || blob), 'image/png');
+    canvas.toBlob((result) => resolve(result || blob), 'image/png');
   });
 }
 
 /**
- * Picks the most odometer-looking number out of raw OCR text.
- * Odometers run 3 to 7 digits; anything outside that is noise.
+ * Stretches greyscale values to the full 0-255 range, then inverts the image
+ * when it is mostly dark. Tesseract reads dark text on a light background;
+ * a digital dash shows light digits on a dark one, so those get flipped.
  */
-function pickReading(text) {
+export function normaliseLuminance(grey) {
+  let min = 255;
+  let max = 0;
+  for (const value of grey) {
+    if (value < min) min = value;
+    if (value > max) max = value;
+  }
+
+  const span = Math.max(1, max - min);
+  const out = new Uint8ClampedArray(grey.length);
+  let total = 0;
+  for (let i = 0; i < grey.length; i += 1) {
+    out[i] = ((grey[i] - min) * 255) / span;
+    total += out[i];
+  }
+
+  if (grey.length && total / grey.length < 128) {
+    for (let i = 0; i < out.length; i += 1) out[i] = 255 - out[i];
+  }
+  return out;
+}
+
+/**
+ * Picks the most odometer-looking number out of raw OCR text.
+ *
+ * Odometers run 3 to 7 digits; anything outside that is noise. With `near`
+ * (the last known reading) the best guess is the smallest number at or above
+ * it, since the odometer only goes up. Otherwise, or when nothing qualifies,
+ * the longest run wins, ties going to the larger value.
+ */
+export function pickReading(text, { near = null } = {}) {
   if (!text) return null;
   const runs = String(text).match(/\d+/g);
-  if (!runs || runs.length === 0) return null;
+  if (!runs) return null;
 
   const candidates = runs
     .map((run) => run.replace(/^0+(?=\d)/, '')) // drop leading zeros
     .filter((run) => run.length >= 3 && run.length <= 7)
     .map((run) => Number.parseInt(run, 10))
-    .filter((n) => Number.isFinite(n) && n > 0 && n <= 9_999_999);
+    .filter((n) => Number.isFinite(n) && n > 0);
 
   if (candidates.length === 0) return null;
 
-  // The odometer is the longest run on the dial; ties go to the larger value.
+  if (Number.isFinite(near)) {
+    const above = candidates.filter((n) => n >= near).sort((a, b) => a - b);
+    if (above.length) return above[0];
+  }
+
   return candidates.sort((a, b) => {
     const lengthDiff = String(b).length - String(a).length;
     return lengthDiff !== 0 ? lengthDiff : b - a;
@@ -179,9 +208,10 @@ function pickReading(text) {
  * Reads an odometer from a photo blob.
  *
  * Resolves with { reading, confidence, text } where reading may be null.
+ * `near` is the last known reading, used to pick between candidate numbers.
  * Never throws for recognition failure; only for an engine that would not load.
  */
-export async function readOdometer(blob, { onProgress } = {}) {
+export async function readOdometer(blob, { onProgress, near = null } = {}) {
   const worker = await getWorker(onProgress);
   const prepared = await preprocess(blob);
 
@@ -191,7 +221,7 @@ export async function readOdometer(blob, { onProgress } = {}) {
   attempts.push({ psm: PSM_SINGLE_BLOCK, data: first.data });
 
   // If a single block gave us nothing usable, try treating it as one line.
-  if (!pickReading(first.data?.text)) {
+  if (!pickReading(first.data?.text, { near })) {
     await worker.setParameters({ tessedit_pageseg_mode: PSM_SINGLE_LINE });
     const second = await worker.recognize(prepared);
     attempts.push({ psm: PSM_SINGLE_LINE, data: second.data });
@@ -200,7 +230,7 @@ export async function readOdometer(blob, { onProgress } = {}) {
 
   let best = { reading: null, confidence: 0, text: '' };
   for (const attempt of attempts) {
-    const reading = pickReading(attempt.data?.text);
+    const reading = pickReading(attempt.data?.text, { near });
     const confidence = Number(attempt.data?.confidence) || 0;
     if (reading !== null && (best.reading === null || confidence > best.confidence)) {
       best = { reading, confidence, text: attempt.data?.text || '' };

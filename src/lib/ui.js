@@ -229,6 +229,41 @@ export function alertDialog({ title, body, dismissLabel = 'OK' }) {
   ]);
 }
 
+/* --------------------------------------------------------- back button -- */
+
+const backLayers = [];
+let popsToSkip = 0;
+
+window.addEventListener('popstate', () => {
+  if (popsToSkip > 0) {
+    popsToSkip -= 1;
+    return;
+  }
+  const onBack = backLayers.pop();
+  if (onBack) onBack();
+});
+
+/**
+ * Makes the phone's Back button close a full-screen layer instead of
+ * leaving the app. Pushes a history entry; Back pops it and calls `onBack`.
+ *
+ * Returns `release()`, which the layer calls when it closes some other way,
+ * to take its history entry back off. Releasing twice is harmless.
+ */
+export function pushBackLayer(onBack) {
+  history.pushState({ layer: true }, '');
+  const entry = () => onBack();
+  backLayers.push(entry);
+
+  return function release() {
+    const index = backLayers.indexOf(entry);
+    if (index === -1) return; // already popped by the Back button
+    backLayers.splice(index, 1);
+    popsToSkip += 1;
+    history.back();
+  };
+}
+
 /* ------------------------------------------------------------- spinner -- */
 
 export function spinner(label = 'Working') {

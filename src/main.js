@@ -11,7 +11,7 @@ import { registerSW } from 'virtual:pwa-register';
 import { renderHome } from './views/home.js';
 import { renderTrips } from './views/trips.js';
 import { renderSettings } from './views/settings.js';
-import { startTripFlow, autoBackup } from './lib/actions.js';
+import { startTripFlow } from './lib/actions.js';
 import { requestPersistentStorage } from './lib/db.js';
 import { h, clear, icon, spinner, toast } from './lib/ui.js';
 
@@ -172,6 +172,15 @@ async function boot() {
   clear(root);
   root.appendChild(h('div', { class: 'boot' }, spinner('Loading your logbook')));
 
+  // Home-screen shortcuts arrive as ?view=trips or ?action=start-trip.
+  const params = new URLSearchParams(location.search);
+  const shortcutView = params.get('view');
+  const startTripNow = params.get('action') === 'start-trip';
+  if (params.size) {
+    const route = ROUTES[shortcutView] ? shortcutView : routeFromHash();
+    history.replaceState(null, '', `${location.pathname}#/${route}`);
+  }
+
   currentRoute = routeFromHash();
   if (!location.hash) location.replace(`#/${currentRoute}`);
 
@@ -188,25 +197,7 @@ async function boot() {
     void render();
   });
 
-  // A manifest shortcut can ask for the camera straight away.
-  const params = new URLSearchParams(location.search);
-  if (params.get('action') === 'start-trip') {
-    history.replaceState(null, '', `${location.pathname}#/home`);
-    const started = await startTripFlow();
-    if (started) await render();
-  }
-
-  // Coming back online is the natural moment to clear a pending backup.
-  window.addEventListener('online', () => {
-    void autoBackup().then((result) => {
-      if (result.ran) void render();
-    });
-  });
-
-  // Re-read on return to the app: another tab may have changed things.
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') void render();
-  });
+  if (startTripNow && (await startTripFlow())) await render();
 }
 
 boot().catch((err) => {

@@ -1,26 +1,21 @@
 /**
- * Backup payloads: one self-contained JSON object holding every trip, every
- * logbook period and every odometer photo as base64.
+ * Backup files: one small JSON file holding every trip.
  *
- * The same payload is used by the Drive upload and the Android share sheet,
- * so a backup saved either way can be restored by either path.
+ * Saved through the Android share sheet (or a download on desktop) and
+ * restored from the file picker. Without photos a year of trips is a few KB.
  */
-import {
-  getAllMeta,
-  getAllPeriods,
-  getAllPhotos,
-  getAllTrips,
-  replaceAll,
-  setMeta,
-} from './db.js';
-import { base64ToBlob, blobToBase64 } from './photo.js';
+import { getAllTrips, getMeta, replaceAll, setMeta } from './db.js';
+import { normaliseTrip } from './trip.js';
 import { fileStamp } from './dates.js';
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 export const APP_TAG = 'car-logbook';
+export const META_LAST_BACKUP_AT = 'lastBackupAt';
 
-/** Meta keys that describe this device, not the logbook, so are not restored. */
-const TRANSIENT_META = new Set(['driveToken']);
+/** Days after the last backup before the home screen starts nudging. */
+export const REMINDER_AFTER_DAYS = 30;
+
+export class BackupFormatError extends Error {}
 
 export function backupFilename(date = new Date()) {
   return `car-logbook-${fileStamp(date)}.json`;
@@ -28,144 +23,96 @@ export function backupFilename(date = new Date()) {
 
 /* ---------------------------------------------------------------- build -- */
 
-export async function buildBackup() {
-  const [trips, periods, photos, meta] = await Promise.all([
-    getAllTrips(),
-    getAllPeriods(),
-    getAllPhotos(),
-    getAllMeta(),
-  ]);
-
-  const encodedPhotos = [];
-  for (const photo of photos) {
-    // Sequential on purpose: encoding hundreds of images at once will spike
-    // memory on a phone, and this runs in the background anyway.
-    // eslint-disable-next-line no-await-in-loop
-    const data = await blobToBase64(photo.blob);
-    encodedPhotos.push({
-      id: photo.id,
-      type: photo.type || 'image/jpeg',
-      width: photo.width ?? null,
-      height: photo.height ?? null,
-      bytes: photo.bytes ?? photo.blob?.size ?? null,
-      createdAt: photo.createdAt || null,
-      data,
-    });
-  }
-
+export function buildBackupPayload(trips, now = new Date()) {
   return {
     app: APP_TAG,
     schemaVersion: SCHEMA_VERSION,
-    exportedAt: new Date().toISOString(),
-    counts: {
-      trips: trips.length,
-      periods: periods.length,
-      photos: encodedPhotos.length,
-    },
+    exportedAt: now.toISOString(),
     trips,
-    periods,
-    photos: encodedPhotos,
-    meta: meta.filter((row) => !TRANSIENT_META.has(row.key)),
   };
 }
 
-export async function buildBackupBlob() {
-  const payload = await buildBackup();
-  const json = JSON.stringify(payload);
+export async function buildBackupFile() {
+  const payload = buildBackupPayload(await getAllTrips());
   return {
     payload,
-    blob: new Blob([json], { type: 'application/json' }),
+    blob: new Blob([JSON.stringify(payload, null, 1)], { type: 'application/json' }),
     filename: backupFilename(new Date(payload.exportedAt)),
   };
 }
 
 /* -------------------------------------------------------------- restore -- */
 
-export class BackupFormatError extends Error {}
-
-/** Throws BackupFormatError unless this really is one of our backups. */
-export function validateBackup(payload) {
-  if (!payload || typeof payload !== 'object') {
+/**
+ * Parses and checks a backup file's text. Accepts files from the first
+ * version of the app too, whose photos and logbook periods are ignored.
+ * Returns { trips, exportedAt }; throws BackupFormatError otherwise.
+ */
+export function parseBackup(text) {
+  let payload;
+  try {
+    payload = JSON.parse(text);
+  } catch {
     throw new BackupFormatError('That file is not a Car Logbook backup.');
   }
-  if (payload.app !== APP_TAG) {
-    throw new BackupFormatError('That file was not produced by Car Logbook.');
-  }
-  if (!Array.isArray(payload.trips)) {
-    throw new BackupFormatError('That backup has no trip list.');
+  if (!payload || typeof payload !== 'object' || payload.app !== APP_TAG) {
+    throw new BackupFormatError('That file was not made by Car Logbook.');
   }
   if (Number(payload.schemaVersion) > SCHEMA_VERSION) {
     throw new BackupFormatError(
       'That backup was made by a newer version of the app. Update the app first.',
     );
   }
-  return true;
-}
+  if (!Array.isArray(payload.trips)) {
+    throw new BackupFormatError('That backup has no trip list.');
+  }
 
-export function describeBackup(payload) {
-  const trips = Array.isArray(payload?.trips) ? payload.trips.length : 0;
-  const photos = Array.isArray(payload?.photos) ? payload.photos.length : 0;
-  const periods = Array.isArray(payload?.periods) ? payload.periods.length : 0;
-  return { trips, photos, periods, exportedAt: payload?.exportedAt || null };
+  const trips = payload.trips.map((raw, index) => {
+    try {
+      return normaliseTrip(raw);
+    } catch {
+      throw new BackupFormatError(`Trip ${index + 1} in that backup is damaged.`);
+    }
+  });
+
+  return { trips, exportedAt: payload.exportedAt || null };
 }
 
 /**
- * Replaces all local data with the backup's contents.
- * Destructive by design: restore means restore, not merge.
+ * Replaces every trip with the backup's. The backup's own time becomes the
+ * last backup time, since the device now holds exactly what that file does.
  */
-export async function restoreBackup(payload) {
-  validateBackup(payload);
-
-  const photos = (payload.photos || []).map((p) => ({
-    id: p.id,
-    blob: base64ToBlob(p.data, p.type || 'image/jpeg'),
-    type: p.type || 'image/jpeg',
-    width: p.width ?? null,
-    height: p.height ?? null,
-    bytes: p.bytes ?? null,
-    createdAt: p.createdAt || null,
-  }));
-
-  const meta = (payload.meta || []).filter(
-    (row) => row && typeof row.key === 'string' && !TRANSIENT_META.has(row.key),
-  );
-
+export async function applyRestore({ trips, exportedAt }) {
   await replaceAll({
-    trips: payload.trips || [],
-    periods: payload.periods || [],
-    photos,
-    meta,
+    trips,
+    meta: [{ key: META_LAST_BACKUP_AT, value: exportedAt || new Date().toISOString() }],
   });
-
-  await setMeta('restoredAt', new Date().toISOString());
-
-  return describeBackup(payload);
 }
 
-export async function parseBackupFile(file) {
-  const text = await file.text();
-  let payload;
-  try {
-    payload = JSON.parse(text);
-  } catch {
-    throw new BackupFormatError('That file is not valid JSON.');
-  }
-  validateBackup(payload);
-  return payload;
+/* ------------------------------------------------------------- reminder -- */
+
+export async function markBackedUp(at = new Date()) {
+  await setMeta(META_LAST_BACKUP_AT, at.toISOString());
 }
 
-/* ----------------------------------------------------- backup bookkeeping -- */
-
-export const META_LAST_BACKUP_AT = 'lastBackupAt';
-export const META_LAST_BACKUP_TARGET = 'lastBackupTarget';
-export const META_PENDING_BACKUP = 'backupPending';
-
-export async function markBackedUp(target) {
-  await setMeta(META_LAST_BACKUP_AT, new Date().toISOString());
-  await setMeta(META_LAST_BACKUP_TARGET, target);
-  await setMeta(META_PENDING_BACKUP, false);
+export function getLastBackupAt() {
+  return getMeta(META_LAST_BACKUP_AT);
 }
 
-export async function markBackupPending() {
-  await setMeta(META_PENDING_BACKUP, true);
+/**
+ * Whether the home screen should nudge for a backup.
+ *
+ * `unsaved` counts finished trips changed since the last backup (a trip in
+ * progress waits until it ends). The nudge shows when
+ * there are any and either nothing was ever backed up or the last backup is
+ * older than REMINDER_AFTER_DAYS.
+ */
+export function backupReminder({ trips, lastBackupAt, now = new Date() }) {
+  const last = lastBackupAt ? new Date(lastBackupAt) : null;
+  const unsaved = trips.filter(
+    (t) => t.end && (!last || new Date(t.updatedAt || t.createdAt || 0) > last),
+  ).length;
+
+  const stale = !last || now - last > REMINDER_AFTER_DAYS * 86_400_000;
+  return { show: unsaved > 0 && stale, unsaved };
 }

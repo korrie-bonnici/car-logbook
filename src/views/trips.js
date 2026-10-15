@@ -1,38 +1,30 @@
 /**
  * Trip list and the edit/delete sheet.
  */
-import {
-  financialYearLabel,
-  formatDate,
-  formatTime,
-  isInFinancialYear,
-} from '../lib/dates.js';
+import { financialYearLabel, formatDate, formatTime, isInFinancialYear } from '../lib/dates.js';
+import { deleteTrip, loadState, updateTrip } from '../lib/logbook.js';
 import {
   financialYearsWithTrips,
   formatKm,
   isComplete,
-  loadState,
   tripKm,
-  validateNotes,
+  validatePurpose,
   validateReading,
-} from '../lib/logbook.js';
-import { deleteTrip, getPhoto, putTrip } from '../lib/db.js';
-import { photoUrl } from '../lib/photo.js';
+  PURPOSE_MAX_LENGTH,
+} from '../lib/trip.js';
 import { h, clear, confirmDialog, openModal, toast } from '../lib/ui.js';
 
 const ALL_YEARS = 'all';
 
-// Kept across re-renders so changing a trip does not reset the filter.
+// Kept across re-renders so editing a trip does not reset the filter.
 let activeFilter = ALL_YEARS;
 
 export async function renderTrips({ navigate, refresh }) {
-  const { trips } = await loadState();
+  const { trips, openTrip } = await loadState();
   const completed = trips.filter(isComplete);
   const years = financialYearsWithTrips(trips);
 
-  if (activeFilter !== ALL_YEARS && !years.includes(activeFilter)) {
-    activeFilter = ALL_YEARS;
-  }
+  if (activeFilter !== ALL_YEARS && !years.includes(activeFilter)) activeFilter = ALL_YEARS;
 
   const visible =
     activeFilter === ALL_YEARS
@@ -57,11 +49,8 @@ export async function renderTrips({ navigate, refresh }) {
     ),
   );
 
-  if (years.length > 1) {
-    view.appendChild(renderFilter(years, refresh));
-  }
+  if (years.length > 1) view.appendChild(renderFilter(years, refresh));
 
-  const openTrip = trips.find((t) => !t.end);
   if (openTrip) {
     view.appendChild(
       h(
@@ -79,11 +68,7 @@ export async function renderTrips({ navigate, refresh }) {
         ),
         h(
           'button',
-          {
-            type: 'button',
-            class: 'btn btn--secondary',
-            onclick: () => navigate('home'),
-          },
+          { type: 'button', class: 'btn btn--secondary', onclick: () => navigate('home') },
           'Go to home',
         ),
       ),
@@ -96,18 +81,10 @@ export async function renderTrips({ navigate, refresh }) {
         'div',
         { class: 'empty' },
         h('p', { class: 'empty__title' }, 'Nothing here yet'),
-        h(
-          'p',
-          { class: 'empty__text' },
-          'Completed trips appear here with their odometer photos.',
-        ),
+        h('p', { class: 'empty__text' }, 'Finished trips appear here.'),
         h(
           'button',
-          {
-            type: 'button',
-            class: 'btn btn--primary',
-            onclick: () => navigate('home'),
-          },
+          { type: 'button', class: 'btn btn--primary', onclick: () => navigate('home') },
           'Start a trip',
         ),
       ),
@@ -115,12 +92,9 @@ export async function renderTrips({ navigate, refresh }) {
     return view;
   }
 
-  const list = h('ul', { class: 'trip-list' });
-  for (const trip of visible) {
-    list.appendChild(await renderTripRow(trip, refresh));
-  }
-  view.appendChild(list);
-
+  view.appendChild(
+    h('ul', { class: 'trip-list' }, ...visible.map((trip) => renderTripRow(trip, refresh))),
+  );
   return view;
 }
 
@@ -151,12 +125,7 @@ function renderFilter(years, refresh) {
   );
 }
 
-async function renderTripRow(trip, refresh) {
-  const [startPhoto, endPhoto] = await Promise.all([
-    getPhoto(trip.start.photoId),
-    getPhoto(trip.end?.photoId),
-  ]);
-
+function renderTripRow(trip, refresh) {
   const km = tripKm(trip);
 
   return h(
@@ -167,62 +136,33 @@ async function renderTripRow(trip, refresh) {
       {
         type: 'button',
         class: 'trip',
-        onclick: () => openTripSheet(trip, { startPhoto, endPhoto, refresh }),
+        onclick: () => openTripSheet(trip, refresh),
         'aria-label': `Trip on ${formatDate(trip.start.at)}, ${formatKm(km)} kilometres. Tap to edit.`,
       },
       h(
         'div',
         { class: 'trip__head' },
         h('span', { class: 'trip__date' }, formatDate(trip.start.at)),
-        h(
-          'span',
-          { class: `pill ${trip.business ? 'pill--business' : 'pill--private'}` },
-          trip.business ? 'Business' : 'Private',
-        ),
         h('span', { class: 'trip__km' }, `${formatKm(km)} km`),
       ),
       h(
         'div',
         { class: 'trip__readings' },
         `${formatKm(trip.start.odometer)} → ${formatKm(trip.end.odometer)} km`,
-        h(
-          'span',
-          { class: 'trip__times' },
-          `${formatTime(trip.start.at)}–${formatTime(trip.end.at)}`,
-        ),
+        h('span', { class: 'trip__times' }, `${formatTime(trip.start.at)}–${formatTime(trip.end.at)}`),
       ),
-      trip.notes ? h('p', { class: 'trip__notes' }, trip.notes) : null,
-      h(
-        'div',
-        { class: 'trip__thumbs' },
-        thumb(startPhoto, 'Start odometer'),
-        thumb(endPhoto, 'End odometer'),
-      ),
+      trip.purpose ? h('p', { class: 'trip__notes' }, trip.purpose) : null,
     ),
   );
 }
 
-function thumb(photo, label) {
-  if (!photo) {
-    return h('span', { class: 'thumb thumb--empty', title: `${label}: no photo` }, '—');
-  }
-  return h('img', {
-    class: 'thumb',
-    src: photoUrl(photo),
-    alt: label,
-    loading: 'lazy',
-    decoding: 'async',
-  });
-}
-
 /* ----------------------------------------------------------- edit sheet -- */
 
-function openTripSheet(trip, { startPhoto, endPhoto, refresh }) {
+function openTripSheet(trip, refresh) {
   const draft = {
     startOdometer: String(trip.start.odometer),
     endOdometer: String(trip.end.odometer),
-    notes: trip.notes || '',
-    business: trip.business !== false,
+    purpose: trip.purpose || '',
   };
 
   return openModal((close) => {
@@ -234,34 +174,29 @@ function openTripSheet(trip, { startPhoto, endPhoto, refresh }) {
 
       const startCheck = validateReading(draft.startOdometer);
       if (!startCheck.ok) errors.push(`Start reading: ${startCheck.error}`);
-
       const endCheck = validateReading(draft.endOdometer);
       if (!endCheck.ok) errors.push(`End reading: ${endCheck.error}`);
 
       const start = Number(draft.startOdometer);
       const end = Number(draft.endOdometer);
       if (startCheck.ok && endCheck.ok && end <= start) {
-        errors.push('End reading must be higher than the start reading.');
+        errors.push('The end reading must be higher than the start reading.');
       }
 
-      const notesCheck = validateNotes(draft.notes);
-      if (!notesCheck.ok) errors.push(notesCheck.error);
+      const purposeCheck = validatePurpose(draft.purpose);
+      if (!purposeCheck.ok) errors.push(purposeCheck.error);
 
       if (errors.length) {
         for (const message of errors) {
-          errorHost.appendChild(
-            h('p', { class: 'message message--error', role: 'alert' }, message),
-          );
+          errorHost.appendChild(h('p', { class: 'message message--error', role: 'alert' }, message));
         }
         return;
       }
 
-      await putTrip({
-        ...trip,
+      await updateTrip(trip.id, {
         start: { ...trip.start, odometer: start },
         end: { ...trip.end, odometer: end },
-        notes: draft.notes.trim(),
-        business: draft.business,
+        purpose: draft.purpose.trim(),
       });
       close(true);
       toast('Trip updated.', { type: 'success' });
@@ -271,13 +206,12 @@ function openTripSheet(trip, { startPhoto, endPhoto, refresh }) {
     const remove = async () => {
       const ok = await confirmDialog({
         title: 'Delete this trip?',
-        body: `The ${formatDate(trip.start.at)} trip and both odometer photos will be removed. This cannot be undone.`,
+        body: `The ${formatDate(trip.start.at)} trip will be removed. This cannot be undone.`,
         confirmLabel: 'Delete trip',
         destructive: true,
       });
       if (!ok) return;
       await deleteTrip(trip.id);
-      close(true);
       toast('Trip deleted.');
       await refresh();
     };
@@ -290,13 +224,6 @@ function openTripSheet(trip, { startPhoto, endPhoto, refresh }) {
         `${formatTime(trip.start.at)}–${formatTime(trip.end.at)} · ${formatKm(tripKm(trip))} km`,
       ),
 
-      h(
-        'div',
-        { class: 'photo-pair' },
-        photoPanel(startPhoto, 'Start', trip.start),
-        photoPanel(endPhoto, 'End', trip.end),
-      ),
-
       numberField('Start odometer', draft.startOdometer, (value) => {
         draft.startOdometer = value;
       }),
@@ -307,48 +234,15 @@ function openTripSheet(trip, { startPhoto, endPhoto, refresh }) {
       h(
         'div',
         { class: 'field' },
-        h('span', { class: 'field__label' }, 'Type of use'),
-        h(
-          'div',
-          { class: 'segmented', role: 'group', 'aria-label': 'Type of use' },
-          ...[
-            { label: 'Business', value: true },
-            { label: 'Private', value: false },
-          ].map((option) =>
-            h(
-              'button',
-              {
-                type: 'button',
-                class: `segmented__option ${draft.business === option.value ? 'is-active' : ''}`,
-                'aria-pressed': draft.business === option.value ? 'true' : 'false',
-                onclick: (event) => {
-                  draft.business = option.value;
-                  const group = event.currentTarget.parentElement;
-                  for (const node of group.children) {
-                    const active = node === event.currentTarget;
-                    node.classList.toggle('is-active', active);
-                    node.setAttribute('aria-pressed', active ? 'true' : 'false');
-                  }
-                },
-              },
-              option.label,
-            ),
-          ),
-        ),
-      ),
-
-      h(
-        'div',
-        { class: 'field' },
-        h('label', { class: 'field__label', for: 'edit-notes' }, 'Purpose'),
+        h('label', { class: 'field__label', for: 'edit-purpose' }, 'Purpose'),
         h('textarea', {
-          id: 'edit-notes',
+          id: 'edit-purpose',
           class: 'field__input field__textarea',
           rows: '3',
-          maxlength: '500',
-          value: draft.notes,
+          maxlength: String(PURPOSE_MAX_LENGTH),
+          value: draft.purpose,
           oninput: (event) => {
-            draft.notes = event.target.value;
+            draft.purpose = event.target.value;
           },
         }),
       ),
@@ -364,26 +258,6 @@ function openTripSheet(trip, { startPhoto, endPhoto, refresh }) {
       ),
     ];
   });
-}
-
-function photoPanel(photo, label, reading) {
-  return h(
-    'figure',
-    { class: 'photo-pair__item' },
-    photo
-      ? h('img', {
-          class: 'photo-pair__img',
-          src: photoUrl(photo),
-          alt: `${label} odometer photo`,
-          loading: 'lazy',
-        })
-      : h('div', { class: 'photo-pair__missing' }, 'No photo'),
-    h(
-      'figcaption',
-      { class: 'photo-pair__cap' },
-      `${label} · ${formatTime(reading?.at)}`,
-    ),
-  );
 }
 
 function numberField(label, value, onChange) {

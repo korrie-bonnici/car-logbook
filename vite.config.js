@@ -4,33 +4,11 @@ import { VitePWA } from 'vite-plugin-pwa';
 // Deployed at https://<user>.github.io/car-logbook/
 const BASE = '/car-logbook/';
 
-/**
- * Injects the runtime config script into index.html.
- *
- * public/app-config.js is a plain (non-module) script that Vite must not
- * bundle, since the whole point is that it can be edited after a build.
- * Writing the tag in index.html by hand makes Vite warn about an unbundlable
- * script, so it goes in here instead, after the HTML is otherwise finished.
- */
-function injectRuntimeConfig() {
-  return {
-    name: 'car-logbook-runtime-config',
-    transformIndexHtml: {
-      order: 'post',
-      handler() {
-        return [
-          {
-            tag: 'script',
-            attrs: { src: `${BASE}app-config.js` },
-            injectTo: 'head-prepend',
-          },
-        ];
-      },
-    },
-  };
-}
-
 export default defineConfig({
+  test: {
+    include: ['tests/**/*.test.js'],
+  },
+
   base: BASE,
 
   build: {
@@ -47,8 +25,6 @@ export default defineConfig({
   },
 
   plugins: [
-    injectRuntimeConfig(),
-
     VitePWA({
       registerType: 'autoUpdate',
       includeAssets: ['favicon.svg', 'icons/apple-touch-icon.png'],
@@ -58,7 +34,7 @@ export default defineConfig({
         name: 'Car Logbook',
         short_name: 'Logbook',
         description:
-          'Offline-first vehicle logbook. Photograph the odometer, record business trips and back up to Google Drive.',
+          'A paper-style vehicle logbook. Photograph the odometer at each end of a business trip and note the purpose.',
         lang: 'en-AU',
         dir: 'ltr',
         start_url: BASE,
@@ -68,7 +44,7 @@ export default defineConfig({
         orientation: 'portrait',
         background_color: '#0d1117',
         theme_color: '#0d1117',
-        categories: ['productivity', 'travel', 'finance'],
+        categories: ['productivity', 'finance'],
         icons: [
           { src: 'icons/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
           { src: 'icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
@@ -87,7 +63,6 @@ export default defineConfig({
 
         // Single-page app: any in-scope navigation falls back to the shell.
         navigateFallback: `${BASE}index.html`,
-        navigateFallbackDenylist: [/^\/api\//],
         cleanupOutdatedCaches: true,
         clientsClaim: true,
         skipWaiting: true,

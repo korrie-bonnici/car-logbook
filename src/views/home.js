@@ -1,42 +1,30 @@
 /**
- * Home: open trip status, the headline numbers and the primary actions.
+ * Home: the trip in progress (or the button to start one), this financial
+ * year's totals, and a nudge when a backup is due.
  */
-import { financialYearLabel, formatDateTime, formatRelative } from '../lib/dates.js';
 import {
-  cancelTrip,
-  formatKm,
-  formatPercent,
-  loadState,
-  summarise,
-  summarisePeriod,
-} from '../lib/logbook.js';
-import { getMeta } from '../lib/db.js';
-import {
-  META_LAST_BACKUP_AT,
-  META_LAST_BACKUP_TARGET,
-  META_PENDING_BACKUP,
-} from '../lib/backup.js';
-import { isDriveConfigured } from '../lib/config.js';
-import { hasValidToken, backupToDrive } from '../lib/drive.js';
-import { shareBackup, canShareFiles } from '../lib/export.js';
-import {
-  endPeriodFlow,
-  endTripFlow,
-  startPeriodFlow,
-  startTripFlow,
-} from '../lib/actions.js';
+  currentFinancialYear,
+  financialYearLabel,
+  formatDateTime,
+  formatRelative,
+} from '../lib/dates.js';
+import { cancelTrip, loadState } from '../lib/logbook.js';
+import { formatKm, summarise } from '../lib/trip.js';
+import { backupReminder, getLastBackupAt } from '../lib/backup.js';
+import { canShareFiles, saveBackup } from '../lib/export.js';
+import { endTripFlow, startTripFlow } from '../lib/actions.js';
 import { h, toast, withBusy, confirmDialog } from '../lib/ui.js';
 
 export async function renderHome({ navigate, refresh }) {
-  const [{ trips, periods, openTrip, openPeriod }, lastBackupAt, lastTarget, pending] =
-    await Promise.all([
-      loadState(),
-      getMeta(META_LAST_BACKUP_AT),
-      getMeta(META_LAST_BACKUP_TARGET),
-      getMeta(META_PENDING_BACKUP, false),
-    ]);
+  const [{ trips, openTrip }, lastBackupAt] = await Promise.all([
+    loadState(),
+    getLastBackupAt(),
+  ]);
 
-  const totals = summarise(trips);
+  const year = currentFinancialYear();
+  const totals = summarise(trips, year);
+  const reminder = backupReminder({ trips, lastBackupAt });
+
   const view = h('div', { class: 'view view--home' });
 
   view.appendChild(
@@ -44,85 +32,40 @@ export async function renderHome({ navigate, refresh }) {
       'header',
       { class: 'page-head' },
       h('h1', { class: 'page-title' }, 'Car Logbook'),
-      h(
-        'p',
-        { class: 'page-sub' },
-        `Financial year ${financialYearLabel(totals.financialYear)}`,
-      ),
+      h('p', { class: 'page-sub' }, `Financial year ${financialYearLabel(year)}`),
     ),
   );
-
-  /* ----------------------------------------------------- backup banner */
-
-  const needsBackup = Boolean(pending) && totals.tripCount > 0;
-  if (needsBackup) {
-    view.appendChild(renderBackupBanner({ refresh }));
-  }
-
-  /* -------------------------------------------------------- trip state */
 
   view.appendChild(renderTripCard({ openTrip, refresh }));
 
-  /* ------------------------------------------------------------ totals */
-
   view.appendChild(
     h(
       'section',
-      { class: 'stats', 'aria-label': 'Summary' },
-      stat(
-        'Business km',
-        formatKm(totals.fyBusinessKm),
-        `FY ${financialYearLabel(totals.financialYear)}`,
-        'primary',
-      ),
-      stat('Trips', formatKm(totals.fyTripCount), 'This financial year'),
-      stat('All-time km', formatKm(totals.allTimeKm), `${totals.tripCount} trips logged`),
-      stat(
-        'Last backed up',
-        lastBackupAt ? formatRelative(lastBackupAt) : 'Never',
-        lastBackupAt
-          ? lastTarget === 'drive'
-            ? 'Google Drive'
-            : 'Shared file'
-          : 'No backup yet',
-        lastBackupAt ? '' : 'muted',
-      ),
+      { class: 'stats', 'aria-label': 'This financial year' },
+      stat('Business km', formatKm(totals.km), `FY ${financialYearLabel(year)}`, 'primary'),
+      stat('Trips', formatKm(totals.tripCount), 'This financial year'),
     ),
   );
 
-  /* --------------------------------------------------- logbook period */
-
-  view.appendChild(renderPeriodCard({ openPeriod, periods, trips, refresh }));
-
-  /* -------------------------------------------------------- shortcuts */
+  if (reminder.show) view.appendChild(renderBackupBanner({ reminder, lastBackupAt, refresh }));
 
   view.appendChild(
     h(
-      'section',
-      { class: 'card card--quiet' },
-      h('h2', { class: 'card__title' }, 'Records'),
-      h(
-        'div',
-        { class: 'stack' },
-        h(
-          'button',
-          {
-            type: 'button',
-            class: 'btn btn--secondary btn--block',
-            onclick: () => navigate('trips'),
-          },
-          `View all trips (${totals.tripCount})`,
-        ),
-        h(
-          'button',
-          {
-            type: 'button',
-            class: 'btn btn--secondary btn--block',
-            onclick: () => navigate('settings'),
-          },
-          'Backup, export and settings',
-        ),
-      ),
+      'button',
+      {
+        type: 'button',
+        class: 'btn btn--secondary btn--block',
+        onclick: () => navigate('trips'),
+      },
+      'View all trips',
+    ),
+  );
+
+  view.appendChild(
+    h(
+      'p',
+      { class: 'page-foot' },
+      lastBackupAt ? `Last backup ${formatRelative(lastBackupAt).toLowerCase()}` : 'No backup yet',
     ),
   );
 
@@ -133,7 +76,6 @@ export async function renderHome({ navigate, refresh }) {
 
 function renderTripCard({ openTrip, refresh }) {
   if (openTrip) {
-    const since = formatDateTime(openTrip.start.at);
     return h(
       'section',
       { class: 'card card--active' },
@@ -146,9 +88,8 @@ function renderTripCard({ openTrip, refresh }) {
       h(
         'dl',
         { class: 'readout' },
-        readoutRow('Started', since),
+        readoutRow('Started', formatDateTime(openTrip.start.at)),
         readoutRow('Start reading', `${formatKm(openTrip.start.odometer)} km`),
-        readoutRow('Type', openTrip.business === false ? 'Private' : 'Business'),
       ),
       h(
         'div',
@@ -160,8 +101,7 @@ function renderTripCard({ openTrip, refresh }) {
             class: 'btn btn--primary btn--xl btn--block',
             onclick: async (event) => {
               await withBusy(event.currentTarget, 'Opening camera…', async () => {
-                const done = await endTripFlow(openTrip);
-                if (done) await refresh();
+                if (await endTripFlow(openTrip)) await refresh();
               });
             },
           },
@@ -175,9 +115,7 @@ function renderTripCard({ openTrip, refresh }) {
             onclick: async () => {
               const ok = await confirmDialog({
                 title: 'Discard this trip?',
-                body:
-                  'The start reading and its photo will be deleted. ' +
-                  'This cannot be undone.',
+                body: 'The start reading will be deleted. This cannot be undone.',
                 confirmLabel: 'Discard trip',
                 destructive: true,
               });
@@ -197,11 +135,7 @@ function renderTripCard({ openTrip, refresh }) {
     'section',
     { class: 'card' },
     h('h2', { class: 'card__title' }, 'No trip in progress'),
-    h(
-      'p',
-      { class: 'card__text' },
-      'Photograph the odometer to start recording a trip.',
-    ),
+    h('p', { class: 'card__text' }, 'Photograph the odometer as you set off on a business trip.'),
     h(
       'button',
       {
@@ -209,8 +143,7 @@ function renderTripCard({ openTrip, refresh }) {
         class: 'btn btn--primary btn--xl btn--block',
         onclick: async (event) => {
           await withBusy(event.currentTarget, 'Opening camera…', async () => {
-            const done = await startTripFlow();
-            if (done) await refresh();
+            if (await startTripFlow()) await refresh();
           });
         },
       },
@@ -219,175 +152,45 @@ function renderTripCard({ openTrip, refresh }) {
   );
 }
 
-function renderPeriodCard({ openPeriod, periods, trips, refresh }) {
-  const closed = periods.filter((p) => p.end);
-
-  if (openPeriod) {
-    const summary = summarisePeriod(openPeriod, trips);
-    return h(
-      'section',
-      { class: 'card' },
-      h('h2', { class: 'card__title' }, 'Logbook period running'),
-      h(
-        'dl',
-        { class: 'readout' },
-        readoutRow('Started', formatDateTime(openPeriod.start.at)),
-        readoutRow(
-          'Days elapsed',
-          `${summary.days} ${summary.days === 1 ? 'day' : 'days'}`,
-        ),
-        readoutRow('Business km so far', `${formatKm(summary.businessKm)} km`),
-        readoutRow('Logged km so far', `${formatKm(summary.loggedKm)} km`),
-        readoutRow(
-          'Business use so far',
-          summary.businessPercent === null
-            ? '—'
-            : formatPercent(summary.businessPercent),
-        ),
-      ),
-      summary.meetsTwelveWeeks
-        ? h(
-            'p',
-            { class: 'note note--ok' },
-            'This period has run the 12 continuous weeks the ATO asks for.',
-          )
-        : h(
-            'p',
-            { class: 'note' },
-            `${Math.max(0, 84 - summary.days)} more days to reach 12 continuous weeks.`,
-          ),
-      h(
-        'button',
-        {
-          type: 'button',
-          class: 'btn btn--secondary btn--block',
-          onclick: async (event) => {
-            await withBusy(event.currentTarget, 'Opening camera…', async () => {
-              const done = await endPeriodFlow(openPeriod);
-              if (done) await refresh();
-            });
-          },
-        },
-        'End logbook period',
-      ),
-    );
-  }
-
-  const latest = closed[0];
-  const latestSummary = latest ? summarisePeriod(latest, trips) : null;
-
-  return h(
-    'section',
-    { class: 'card card--quiet' },
-    h('h2', { class: 'card__title' }, 'Logbook period'),
-    latestSummary
-      ? h(
-          'dl',
-          { class: 'readout' },
-          readoutRow(
-            'Last period',
-            `${latestSummary.days} days to ${formatRelative(latest.end.at)}`,
-          ),
-          readoutRow('Total km', `${formatKm(latestSummary.totalKm)} km`),
-          readoutRow('Business km', `${formatKm(latestSummary.businessKm)} km`),
-          readoutRow(
-            'Business use',
-            latestSummary.businessPercent === null
-              ? '—'
-              : formatPercent(latestSummary.businessPercent),
-          ),
-        )
-      : h(
-          'p',
-          { class: 'card__text' },
-          'Optional. Run a 12 week period to work out your business use percentage.',
-        ),
-    h(
-      'button',
-      {
-        type: 'button',
-        class: 'btn btn--secondary btn--block',
-        onclick: async (event) => {
-          await withBusy(event.currentTarget, 'Opening camera…', async () => {
-            const done = await startPeriodFlow();
-            if (done) await refresh();
-          });
-        },
-      },
-      'Start logbook period',
-    ),
-  );
-}
-
-function renderBackupBanner({ refresh }) {
-  const driveReady = isDriveConfigured();
-
-  const action = driveReady
-    ? h(
-        'button',
-        {
-          type: 'button',
-          class: 'btn btn--primary',
-          onclick: async (event) => {
-            await withBusy(event.currentTarget, 'Backing up…', async () => {
-              try {
-                const file = await backupToDrive({ interactive: true });
-                toast(
-                  file.deleted
-                    ? `Backed up. ${file.deleted} old backup${file.deleted === 1 ? '' : 's'} removed.`
-                    : 'Backed up to Google Drive.',
-                  { type: 'success' },
-                );
-                await refresh();
-              } catch (err) {
-                toast(err.message || 'Backup failed.', { type: 'error' });
-              }
-            });
-          },
-        },
-        hasValidToken() ? 'Back up now' : 'Connect and back up',
-      )
-    : h(
-        'button',
-        {
-          type: 'button',
-          class: 'btn btn--primary',
-          onclick: async (event) => {
-            await withBusy(event.currentTarget, 'Preparing…', async () => {
-              try {
-                const result = await shareBackup();
-                if (result !== 'cancelled') {
-                  toast(
-                    result === 'shared' ? 'Backup shared.' : 'Backup downloaded.',
-                    { type: 'success' },
-                  );
-                  await refresh();
-                }
-              } catch (err) {
-                toast(err.message || 'Could not create the backup.', { type: 'error' });
-              }
-            });
-          },
-        },
-        canShareFiles() ? 'Share backup' : 'Download backup',
-      );
-
+function renderBackupBanner({ reminder, lastBackupAt, refresh }) {
+  const trips = `${reminder.unsaved} trip${reminder.unsaved === 1 ? '' : 's'}`;
   return h(
     'div',
     { class: 'banner banner--warn', role: 'status' },
     h(
       'div',
       { class: 'banner__text' },
-      h('strong', null, 'Backup needed'),
+      h('strong', null, 'Time for a backup'),
       h(
         'span',
         null,
-        driveReady
-          ? 'New trips are not backed up yet.'
-          : 'Google Drive is not set up. Save a copy through the share sheet.',
+        lastBackupAt
+          ? `${trips} added or changed since your last backup.`
+          : `${trips} only on this phone so far.`,
       ),
     ),
-    action,
+    h(
+      'button',
+      {
+        type: 'button',
+        class: 'btn btn--primary',
+        onclick: async (event) => {
+          await withBusy(event.currentTarget, 'Preparing…', async () => {
+            try {
+              const result = await saveBackup();
+              if (result === 'cancelled') return;
+              toast(result === 'shared' ? 'Backup saved.' : 'Backup downloaded.', {
+                type: 'success',
+              });
+              await refresh();
+            } catch (err) {
+              toast(err.message || 'Could not create the backup.', { type: 'error' });
+            }
+          });
+        },
+      },
+      canShareFiles() ? 'Save backup' : 'Download backup',
+    ),
   );
 }
 
