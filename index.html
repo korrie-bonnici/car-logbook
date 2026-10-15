@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en-AU">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=5"
+    />
+    <meta name="theme-color" content="#0d1117" />
+    <meta name="color-scheme" content="dark" />
+    <meta
+      name="description"
+      content="Offline-first vehicle logbook for Australian business-use records."
+    />
+
+    <!-- Android home-screen install -->
+    <link rel="icon" href="/car-logbook/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/car-logbook/icons/apple-touch-icon.png" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Logbook" />
+
+    <title>Car Logbook</title>
+
+  </head>
+  <body>
+    <div id="app" class="app">
+      <noscript>
+        <p style="padding: 24px; color: #e6edf3">
+          Car Logbook needs JavaScript enabled.
+        </p>
+      </noscript>
+    </div>
+
+    <div id="toast-host" class="toast-host" aria-live="polite" aria-atomic="true"></div>
+    <div id="modal-host" class="modal-host" hidden></div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

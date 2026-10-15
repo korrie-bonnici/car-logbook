@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-ssr/
+*.local
+
+# Generated PWA / service worker artefacts
+dev-dist/
+
+# Editor + OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment / local secrets
+.env
+.env.*
+!.env.example
+
+# Local-only OAuth client ID override (see src/config.js)
+public/config.local.js
